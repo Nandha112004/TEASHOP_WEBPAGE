@@ -844,6 +844,7 @@
 
     <script type="module">
       import { initializeApp } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-app.js";
+      import { getAnalytics } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-analytics.js";
       import {
         getDatabase,
         ref,
@@ -860,12 +861,19 @@
         appId: "1:881931604900:web:9b9a665b6d71f031142731",
         measurementId: "G-HXZV2YY0B8",
         databaseURL:
-          "https://tea-review-41101-default-rtdb.asia-southeast1.firebasedatabase.app",
+          "https://tea-review-41101-default-rtdb.firebaseio.com",
       };
 
       const app = initializeApp(firebaseConfig);
-      const db = getDatabase(app);
-      const reviewsRef = ref(db, "reviews");
+      getAnalytics(app);
+      const DB_URLS = [
+        firebaseConfig.databaseURL,
+        "https://tea-review-41101-default-rtdb.asia-southeast1.firebasedatabase.app",
+        "https://tea-review-41101-default-rtdb.firebaseio.com",
+      ].filter(Boolean);
+      const reviewsPath = "reviews";
+      let db = getDatabase(app);
+      let reviewsRef = ref(db, "reviews");
       const mapFrame = document.getElementById("mapFrame");
       const mapFocus = document.getElementById("mapFocus");
       const routeList = document.getElementById("routeList");
@@ -1087,28 +1095,56 @@
       };
 
       const fetchReviews = async () => {
-        try {
-          const snap = await get(reviewsRef);
-          if (!snap.exists()) return defaultReviews;
-          return Object.entries(snap.val())
-            .map(([id, item]) => ({ id, ...item }))
-            .sort((a, b) => {
-              const bDate =
-                b.createdAt || (b.date ? new Date(b.date).getTime() : 0) || 0;
-              const aDate =
-                a.createdAt || (a.date ? new Date(a.date).getTime() : 0) || 0;
-              return bDate - aDate;
-            });
-        } catch (error) {
-          console.error(error);
-          showToast("Loading reviews failed, showing offline sample");
-          return defaultReviews;
+        let lastError;
+        for (const url of DB_URLS) {
+          try {
+            const candidateDb = getDatabase(app, url);
+            const snap = await get(ref(candidateDb, reviewsPath));
+            db = candidateDb;
+            reviewsRef = ref(db, reviewsPath);
+            if (!snap.exists()) return defaultReviews;
+            return Object.entries(snap.val())
+              .map(([id, item]) => ({ id, ...item }))
+              .sort((a, b) => {
+                const bDate =
+                  b.createdAt ||
+                  (b.date ? new Date(b.date).getTime() : 0) ||
+                  0;
+                const aDate =
+                  a.createdAt ||
+                  (a.date ? new Date(a.date).getTime() : 0) ||
+                  0;
+                return bDate - aDate;
+              });
+          } catch (error) {
+            lastError = error;
+          }
         }
+        console.error("fetchReviews failed", lastError);
+        showToast(
+          lastError?.code === "PERMISSION_DENIED"
+            ? "Firebase rules block reads"
+            : "Loading reviews failed, showing offline sample",
+        );
+        return defaultReviews;
       };
 
       const postReview = async (review) => {
-        const result = await push(reviewsRef, review);
-        return result.key;
+        let lastError;
+        const urlsToTry = db ? [null, ...DB_URLS] : DB_URLS; // null means current db
+        for (const url of urlsToTry) {
+          try {
+            if (url) {
+              db = getDatabase(app, url);
+              reviewsRef = ref(db, reviewsPath);
+            }
+            const result = await push(reviewsRef, review);
+            return result.key;
+          } catch (error) {
+            lastError = error;
+          }
+        }
+        throw lastError || new Error("Failed to reach Firebase");
       };
 
       let reviews = [];
@@ -1159,8 +1195,12 @@
             reviewForm.reset();
             showToast("Review added successfully");
           } catch (error) {
-            console.error(error);
-            showToast("Could not save review. Check internet/Firebase rules.");
+            console.error("postReview failed", error);
+            showToast(
+              error?.code === "PERMISSION_DENIED"
+                ? "Firebase rules block writes"
+                : "Could not save review. Check internet/Firebase rules.",
+            );
           } finally {
             if (submitBtn) {
               submitBtn.disabled = false;
